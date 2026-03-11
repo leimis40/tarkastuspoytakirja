@@ -44,7 +44,7 @@ SECTION_DEFINITIONS = {
         "Lukitus, avainhallinta ja pääsyrajoitukset kunnossa",
         "Varoitus- ja ohjekilvet näkyvissä",
         "Merkinnät ajantasalla",
-        "Pelastus- ja käyttöohjeet saatavilla",
+        "Laitteiden käyttöohjeet saatavilla",
         "Valaistus riittävä ja toimiva",
         "Poikkeavat hajut, äänet tai lämpenemät",
         "Kosteus-, pöly- tai vesivuotojälkiä havaittavissa",
@@ -383,12 +383,6 @@ def build_report(data: Dict) -> str:
     for section_name, rows in data["tarkastusosiot"].items():
         section_html += section_summary_rows(section_name, rows)
 
-    attachments_html = ""
-    if data["liitteet"]:
-        attachments_html = "<ul>" + "".join([f"<li>{name}</li>" for name in data["liitteet"]]) + "</ul>"
-    else:
-        attachments_html = "<p>Ei liitteitä.</p>"
-
     logo_bytes = load_logo_bytes()
     logo_html = ""
     if logo_bytes:
@@ -447,11 +441,6 @@ def build_report(data: Dict) -> str:
         </div>
 
         {section_html}
-
-        <div class="box">
-            <h3>Liitteet</h3>
-            {attachments_html}
-        </div>
 
         <div class="box">
             <h3>Kuittaukset</h3>
@@ -699,7 +688,7 @@ def gather_form_data() -> Dict:
             "lisahuomiot": st.session_state.get("lisahuomiot", ""),
         },
         "tarkastusosiot": {},
-        "liitteet": st.session_state.get("attachment_names", []),
+        "liitteet": [],
         "kuittaukset": {
             "tarkastaja_kuittaus": st.session_state.get("tarkastaja_kuittaus", ""),
             "vastaanottaja_kuittaus": st.session_state.get("vastaanottaja_kuittaus", ""),
@@ -900,16 +889,7 @@ with col5:
         placeholder="Vapaa yhteenveto, rajaukset, suositukset ja lisätiedot.",
     )
 
-st.header("4. Liitteet")
-attachments = st.file_uploader(
-    "Liitä kuvia, mittauspöytäkirjoja tai muita dokumentteja (vain nimilista tallennetaan raporttiin)",
-    accept_multiple_files=True,
-)
-st.session_state["attachment_names"] = [file.name for file in attachments] if attachments else []
-if st.session_state["attachment_names"]:
-    st.info("Liitteet: " + ", ".join(st.session_state["attachment_names"]))
-
-st.header("5. Kuittaukset")
+st.header("4. Kuittaukset")
 col6, col7 = st.columns(2)
 
 with col6:
@@ -988,17 +968,41 @@ st.subheader("Raporttiesikatselu")
 st.components.v1.html(html_report, height=900, scrolling=True)
 
 with st.expander("Asennus- ja käyttöohje"):
-    st.code(
-        """pip install streamlit python-docx reportlab pillow
-python -m streamlit run tarkastuspoytakirja_streamlit_app.py""",
-        language="bash",
-    )
     st.markdown(
-        """
-        **Vinkit jatkokehitykseen:**
-        - Lisää tiedosto `mirus_logo.png` samaan kansioon kuin sovellus, jotta logo näkyy sovelluksessa ja raporteissa.
-        - Lisää sama logo GitHub-repoon Streamlit-julkaisua varten.
-        - Lisää pakolliset kentät ennen raportin latausta.
-        - Lisää automaattinen puutelista vain kohdista `Huomio`, `Korjattava` ja `Välitön vaara`.
-        """
+        f"""
+Tämä tarkastuspöytäkirja toimii selaimessa puhelimella, tabletilla ja tietokoneella.
+
+**Tarkastuksen tekeminen puhelimella**
+
+1. Avaa tarkastuspöytäkirja puhelimen selaimessa.
+2. Täytä kohdetiedot.
+3. Valitse tarvittavat tarkastusosiot kohdasta **Asetukset**.
+4. Kirjaa havainnot ja lisää tarvittaessa valokuvia havaintokohtiin.
+5. Täytä lopuksi yhteenveto ja kuittaukset.
+
+**JSON-tiedoston tallentaminen työn aikana**
+
+JSON on ohjelman tallennustiedosto. Sen avulla tarkastusta voi jatkaa myöhemmin toisella laitteella.
+
+1. Paina lopuksi tai työn aikana **Lataa JSON**.
+2. Puhelin tallentaa tiedoston latauksiin.
+3. Tiedoston voi lähettää itselle esimerkiksi sähköpostilla tai siirtää pilvipalveluun.
+
+**JSON-tiedoston avaaminen myöhemmin tietokoneella**
+
+1. Avaa tarkastuspöytäkirja tietokoneella selaimeen.
+2. Avaa vasemman reunan **Asetukset**.
+3. Kohdassa **Tallenna / lataa** valitse aiemmin tallennettu JSON-tiedosto.
+4. Lomake täyttyy automaattisesti aiemmin tallennetuilla tiedoilla.
+5. Viimeistele tarkastus ja lataa lopullinen raportti PDF-, Word-, HTML- tai TXT-muodossa.
+
+**Suositeltu toimintatapa kenttätyössä**
+
+- Tee tarkastus puhelimella paikan päällä.
+- Tallenna JSON työn lopuksi tai jo välivaiheessa.
+- Avaa sama JSON myöhemmin tietokoneella, jos haluat viimeistellä raportin suuremmalla näytöllä.
+- Lataa lopullinen raportti vasta viimeistelyn jälkeen.
+
+Lisätiedot: {WEBSITE_URL}
+"""
     )
