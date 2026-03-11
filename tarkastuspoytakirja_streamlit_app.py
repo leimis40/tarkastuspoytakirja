@@ -7,6 +7,8 @@ from typing import Dict, List
 import streamlit as st
 from PIL import Image
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.shared import Inches
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -17,10 +19,13 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 
 st.set_page_config(
     page_title="Tarkastuspöytäkirja",
-    page_icon="⚡",
+    page_icon="📄",
     layout="wide",
 )
 
+LOGO_PATH = "mirus_logo.png"
+COPYRIGHT_TEXT = "Tekijänoikeudet kuuluvat Mirus Electrum Oy:lle."
+WEBSITE_URL = "https://mirus-electrum.fi"
 
 STATUS_OPTIONS = [
     "OK",
@@ -38,12 +43,12 @@ SECTION_DEFINITIONS = {
         "Tarkastettava tila siisti ja esteetön",
         "Lukitus, avainhallinta ja pääsyrajoitukset kunnossa",
         "Varoitus- ja ohjekilvet näkyvissä",
-        "Yksiviivakaavio ja merkinnät ajan tasalla",
+        "Merkinnät ajantasalla",
         "Pelastus- ja käyttöohjeet saatavilla",
         "Valaistus riittävä ja toimiva",
         "Poikkeavat hajut, äänet tai lämpenemät",
         "Kosteus-, pöly- tai vesivuotojälkiä havaittavissa",
-        "Palontorjuntavälineet saatavilla ja esteettömästi",
+        "Tilan palokatkot",
         "Huolto- ja kunnossapitosuunnitelman toteutuminen",
         "Suunnitelmat vastaavat toteutusta",
     ],
@@ -102,13 +107,12 @@ SECTION_DEFINITIONS = {
         "Suunnitelmat vastaavat toteutusta",
     ],
     "Muut tilat / huollon havainnot": [
-        "Kiinteistön muut tilat eivät kuulu tämän tarkastuksen päälaajuuteen",
-        "Mahdolliset huollolle välitettävät havainnot kirjattu",
-        "Turvallisuuteen vaikuttavat poikkeamat välitetään viipymättä",
+        "Muut havainnot kiinteistöstä/laitteistosta",
+        "Tehdyistä muutoksista on olemassa käyttöönottotarkastuspöytäkirja",
+        "Kiinteistön muut järjestelmät, jotka vaativat tarkastusta",
         "Suunnitelmat vastaavat toteutusta",
     ],
 }
-
 
 DEFAULT_ENABLED = ["Yleistarkastus", "Keskijännitekojeisto", "Muuntaja 1", "Pääkeskus"]
 
@@ -118,6 +122,49 @@ def init_state() -> None:
         st.session_state.selected_sections = DEFAULT_ENABLED.copy()
     if "transformer_count" not in st.session_state:
         st.session_state.transformer_count = 1
+    if "pending_loaded_json" not in st.session_state:
+        st.session_state.pending_loaded_json = None
+    if "json_loaded_message" not in st.session_state:
+        st.session_state.json_loaded_message = ""
+
+
+def load_logo_bytes() -> bytes:
+    try:
+        with open(LOGO_PATH, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        return b""
+
+
+def add_hyperlink(paragraph, text: str, url: str) -> None:
+    part = paragraph.part
+    r_id = part.relate_to(
+        url,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+
+    new_run = OxmlElement("w:r")
+    r_pr = OxmlElement("w:rPr")
+
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    r_pr.append(color)
+
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    r_pr.append(underline)
+
+    new_run.append(r_pr)
+
+    text_elem = OxmlElement("w:t")
+    text_elem.text = text
+    new_run.append(text_elem)
+
+    hyperlink.append(new_run)
+    paragraph._p.append(hyperlink)
 
 
 def get_transformer_sections() -> List[str]:
@@ -250,6 +297,7 @@ def render_check_section(section_name: str, items: List[str]) -> None:
                     if st.button("Poista kaikki kuvat", key=make_key(section_name, idx, "remove_image")):
                         st.session_state[make_key(section_name, idx, "image_data")] = []
                         st.rerun()
+
             with col2:
                 st.selectbox(
                     "Tila",
@@ -298,16 +346,18 @@ def section_summary_rows(section_name: str, rows: List[Dict]) -> str:
                     f'<img src="{image_to_data_uri(image_dict)}" style="max-width:220px; max-height:180px; margin:4px; border:1px solid #cbd5e1; border-radius:6px;" />'
                 )
             image_html = "".join(image_tags)
+
         html_rows += f"""
         <tr>
             <td>{row['kohta']}</td>
-            <td><span class=\"pill {status_class}\">{row['tila']}</span></td>
+            <td><span class="pill {status_class}">{row['tila']}</span></td>
             <td>{row['riskitaso']}</td>
             <td>{row['kommentti'] or '-'}</td>
             <td>{row['toimenpide'] or '-'}</td>
             <td>{image_html}</td>
         </tr>
         """
+
     return f"""
     <h2>{section_name}</h2>
     <table>
@@ -339,6 +389,12 @@ def build_report(data: Dict) -> str:
     else:
         attachments_html = "<p>Ei liitteitä.</p>"
 
+    logo_bytes = load_logo_bytes()
+    logo_html = ""
+    if logo_bytes:
+        encoded_logo = base64.b64encode(logo_bytes).decode("utf-8")
+        logo_html = f'<img src="data:image/png;base64,{encoded_logo}" style="max-height:90px; margin-bottom:18px;" />'
+
     return f"""
     <!DOCTYPE html>
     <html lang="fi">
@@ -362,6 +418,7 @@ def build_report(data: Dict) -> str:
         </style>
     </head>
     <body>
+        {logo_html}
         <h1>Tarkastuspöytäkirja</h1>
 
         <div class="box">
@@ -403,7 +460,9 @@ def build_report(data: Dict) -> str:
         </div>
 
         <div class="footer">
-            Luotu {datetime.now().strftime('%d.%m.%Y %H:%M')} Streamlit-tarkastussovelluksella.
+            <div>Luotu {datetime.now().strftime('%d.%m.%Y %H:%M')} Streamlit-tarkastussovelluksella.</div>
+            <div style="margin-top:8px;">{COPYRIGHT_TEXT}</div>
+            <div style="margin-top:4px;"><a href="{WEBSITE_URL}">{WEBSITE_URL}</a></div>
         </div>
     </body>
     </html>
@@ -412,9 +471,24 @@ def build_report(data: Dict) -> str:
 
 def build_pdf(report_data: Dict) -> bytes:
     buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=24, leftMargin=24, topMargin=24, bottomMargin=24)
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=24,
+        leftMargin=24,
+        topMargin=24,
+        bottomMargin=24,
+    )
     styles = getSampleStyleSheet()
     story = []
+
+    logo_bytes = load_logo_bytes()
+    if logo_bytes:
+        try:
+            story.append(RLImage(BytesIO(logo_bytes), width=120, height=120))
+            story.append(Spacer(1, 8))
+        except Exception:
+            pass
 
     story.append(Paragraph("Tarkastuspöytäkirja", styles["Title"]))
     story.append(Spacer(1, 12))
@@ -432,11 +506,13 @@ def build_pdf(report_data: Dict) -> bytes:
         ["Sää / olosuhteet", report_data["kohde"]["olosuhteet"]],
     ]
     kohde_table = Table(kohde_rows, colWidths=[150, 360])
-    kohde_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (0, -1), colors.lightgrey),
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-    ]))
+    kohde_table.setStyle(
+        TableStyle([
+            ("BACKGROUND", (0, 0), (0, -1), colors.lightgrey),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ])
+    )
     story.append(Paragraph("Kohdetiedot", styles["Heading2"]))
     story.append(kohde_table)
     story.append(Spacer(1, 12))
@@ -465,13 +541,16 @@ def build_pdf(report_data: Dict) -> bytes:
                 row["toimenpide"] or "-",
             ])
         tbl = Table(table_data, repeatRows=1, colWidths=[150, 60, 60, 130, 110])
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-            ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ]))
+        tbl.setStyle(
+            TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ])
+        )
         story.append(tbl)
+
         for idx, row in enumerate(rows, start=1):
             if row.get("kuvat"):
                 story.append(Spacer(1, 4))
@@ -490,6 +569,9 @@ def build_pdf(report_data: Dict) -> bytes:
     story.append(Paragraph("Kuittaukset", styles["Heading2"]))
     story.append(Paragraph(f"<b>Tarkastaja:</b> {report_data['kuittaukset']['tarkastaja_kuittaus'] or '-'}", styles["BodyText"]))
     story.append(Paragraph(f"<b>Vastaanottaja:</b> {report_data['kuittaukset']['vastaanottaja_kuittaus'] or '-'}", styles["BodyText"]))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph(COPYRIGHT_TEXT, styles["BodyText"]))
+    story.append(Paragraph(f'<link href="{WEBSITE_URL}">{WEBSITE_URL}</link>', styles["BodyText"]))
 
     doc.build(story)
     return buffer.getvalue()
@@ -497,6 +579,14 @@ def build_pdf(report_data: Dict) -> bytes:
 
 def build_word(report_data: Dict) -> bytes:
     doc = Document()
+
+    logo_bytes = load_logo_bytes()
+    if logo_bytes:
+        try:
+            doc.add_picture(BytesIO(logo_bytes), width=Inches(1.4))
+        except Exception:
+            pass
+
     doc.add_heading("Tarkastuspöytäkirja", level=0)
 
     doc.add_heading("Kohdetiedot", level=1)
@@ -540,6 +630,7 @@ def build_word(report_data: Dict) -> bytes:
         hdr[2].text = "Riski"
         hdr[3].text = "Kommentti"
         hdr[4].text = "Toimenpide"
+
         for rowdata in rows:
             row = section_table.add_row().cells
             row[0].text = rowdata["kohta"]
@@ -547,6 +638,7 @@ def build_word(report_data: Dict) -> bytes:
             row[2].text = rowdata["riskitaso"]
             row[3].text = rowdata["kommentti"] or "-"
             row[4].text = rowdata["toimenpide"] or "-"
+
         for idx, rowdata in enumerate(rows, start=1):
             if rowdata.get("kuvat"):
                 doc.add_paragraph(f"{section_name} / kohta {idx}: {rowdata['kohta']} - valokuvat")
@@ -562,9 +654,16 @@ def build_word(report_data: Dict) -> bytes:
     p1 = doc.add_paragraph()
     p1.add_run("Tarkastaja: ").bold = True
     p1.add_run(report_data["kuittaukset"]["tarkastaja_kuittaus"] or "-")
+
     p2 = doc.add_paragraph()
     p2.add_run("Vastaanottaja: ").bold = True
     p2.add_run(report_data["kuittaukset"]["vastaanottaja_kuittaus"] or "-")
+
+    footer_para = doc.add_paragraph()
+    footer_para.add_run(COPYRIGHT_TEXT)
+
+    footer_link_para = doc.add_paragraph()
+    add_hyperlink(footer_link_para, WEBSITE_URL, WEBSITE_URL)
 
     buffer = BytesIO()
     doc.save(buffer)
@@ -630,12 +729,18 @@ def load_json_to_state(data: Dict) -> None:
     st.session_state["olosuhteet"] = kohde.get("olosuhteet", "")
 
     try:
-        st.session_state["tarkastuspaiva"] = datetime.strptime(kohde.get("tarkastuspaiva", str(date.today())), "%Y-%m-%d").date()
+        st.session_state["tarkastuspaiva"] = datetime.strptime(
+            kohde.get("tarkastuspaiva", str(date.today())),
+            "%Y-%m-%d",
+        ).date()
     except ValueError:
         st.session_state["tarkastuspaiva"] = date.today()
 
     try:
-        st.session_state["seuraava_tarkastus"] = datetime.strptime(yhteenveto.get("seuraava_tarkastus", str(date.today())), "%Y-%m-%d").date()
+        st.session_state["seuraava_tarkastus"] = datetime.strptime(
+            yhteenveto.get("seuraava_tarkastus", str(date.today())),
+            "%Y-%m-%d",
+        ).date()
     except ValueError:
         st.session_state["seuraava_tarkastus"] = date.today()
 
@@ -648,9 +753,8 @@ def load_json_to_state(data: Dict) -> None:
 
     sections = list(data.get("tarkastusosiot", {}).keys())
     transformer_sections = [sec for sec in sections if sec.startswith("Muuntaja ")]
-    st.session_state.transformer_count = max(1, len(transformer_sections)) if transformer_sections else max(1, st.session_state.get("transformer_count", 1))
-    sync_selected_sections()
-    st.session_state.selected_sections = sections if sections else [sec for sec in DEFAULT_ENABLED if sec in get_available_sections()]
+    st.session_state["transformer_count"] = len(transformer_sections) if transformer_sections else 1
+    st.session_state["selected_sections"] = sections if sections else [sec for sec in DEFAULT_ENABLED if sec in get_available_sections()]
 
     for section_name, rows in data.get("tarkastusosiot", {}).items():
         for idx, row in enumerate(rows):
@@ -663,7 +767,17 @@ def load_json_to_state(data: Dict) -> None:
 
 init_state()
 
-st.title("⚡ Tarkastuspöytäkirja")
+if st.session_state.pending_loaded_json is not None:
+    load_json_to_state(st.session_state.pending_loaded_json)
+    st.session_state.pending_loaded_json = None
+    st.session_state.json_loaded_message = "Pöytäkirja ladattu lomakkeelle."
+    st.rerun()
+
+logo_bytes = load_logo_bytes()
+if logo_bytes:
+    st.image(logo_bytes, width=180)
+
+st.title("Tarkastuspöytäkirja")
 st.markdown(
     "Selainpohjainen Streamlit-sovellus sähkölaitteistojen säännöllisiin tarkastuskäynteihin. "
     "Tarkastusosiot valitaan asetuksista kohdekohtaisesti ja havaintoon voi liittää useita valokuvia."
@@ -674,12 +788,17 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Tallenna / lataa")
+
+    if st.session_state.json_loaded_message:
+        st.success(st.session_state.json_loaded_message)
+        st.session_state.json_loaded_message = ""
+
     uploaded_json = st.file_uploader("Lataa aiempi JSON-pöytäkirja", type=["json"])
     if uploaded_json is not None:
         try:
             loaded_data = json.load(uploaded_json)
-            load_json_to_state(loaded_data)
-            st.success("Pöytäkirja ladattu lomakkeelle.")
+            st.session_state.pending_loaded_json = loaded_data
+            st.rerun()
         except Exception as exc:
             st.error(f"JSON-lataus epäonnistui: {exc}")
 
@@ -692,6 +811,7 @@ with st.sidebar:
         on_change=sync_selected_sections,
         help="Voit lisätä kohteelle useita muuntajaosioita, esim. Muuntaja 1 ja Muuntaja 2.",
     )
+
     available_sections = get_available_sections()
     default_selected = [sec for sec in st.session_state.get("selected_sections", DEFAULT_ENABLED) if sec in available_sections]
     st.multiselect(
@@ -703,16 +823,23 @@ with st.sidebar:
 
 st.header("1. Kohdetiedot")
 col1, col2, col3 = st.columns(3)
+
 with col1:
     st.text_input("Kohteen nimi", key="kohteen_nimi")
     st.text_input("Osoite", key="osoite")
     st.date_input("Tarkastuspäivä", key="tarkastuspaiva", value=date.today(), format="DD.MM.YYYY")
+
 with col2:
     st.text_input("Tarkastaja", key="tarkastaja")
     st.text_input("Käytönjohtaja", key="kaytonjohtaja")
     st.text_input("Kiinteistön yhteyshenkilö", key="yhteyshenkilo")
+
 with col3:
-    st.selectbox("Suurin nimellisjännite", ["Pienoisjännite", "230 V", "400 V", "6 kV", "10 kV", "20 kV"], key="suurin_nimellisjannite")
+    st.selectbox(
+        "Suurin nimellisjännite",
+        ["Pienoisjännite", "230 V", "400 V", "6 kV", "10 kV", "20 kV"],
+        key="suurin_nimellisjannite",
+    )
     st.text_input("Kohteen tyyppi", key="kohteen_tyyppi", placeholder="Esim. muuntamo / teollisuuskohde / pumppaamo")
     st.selectbox(
         "Tarkastuksen tyyppi",
@@ -739,6 +866,7 @@ else:
 
 st.header("3. Yhteenveto ja toimenpiteet")
 col4, col5 = st.columns(2)
+
 with col4:
     st.selectbox(
         "Kokonaisarvio",
@@ -762,6 +890,7 @@ with col4:
         height=110,
         placeholder="Kirjaa suunnitellut korjaukset, lisäselvitykset ja vastuuhenkilöt.",
     )
+
 with col5:
     st.date_input("Seuraava tarkastus", key="seuraava_tarkastus", value=date.today(), format="DD.MM.YYYY")
     st.text_area(
@@ -782,12 +911,15 @@ if st.session_state["attachment_names"]:
 
 st.header("5. Kuittaukset")
 col6, col7 = st.columns(2)
+
 with col6:
     st.text_input("Tarkastajan kuittaus", key="tarkastaja_kuittaus", placeholder="Esim. Nimi / päiväys")
+
 with col7:
     st.text_input("Vastaanottajan kuittaus", key="vastaanottaja_kuittaus", placeholder="Esim. Nimi / päiväys")
 
 st.divider()
+
 report_data = gather_form_data()
 json_bytes = json.dumps(report_data, ensure_ascii=False, indent=2).encode("utf-8")
 html_report = build_report(report_data)
@@ -795,6 +927,7 @@ pdf_bytes = build_pdf(report_data)
 word_bytes = build_word(report_data)
 
 col8, col9, col10, col11, col12 = st.columns(5)
+
 with col8:
     st.download_button(
         "Lataa JSON",
@@ -803,6 +936,7 @@ with col8:
         mime="application/json",
         use_container_width=True,
     )
+
 with col9:
     st.download_button(
         "Lataa HTML",
@@ -811,6 +945,7 @@ with col9:
         mime="text/html",
         use_container_width=True,
     )
+
 with col10:
     st.download_button(
         "Lataa PDF",
@@ -819,6 +954,7 @@ with col10:
         mime="application/pdf",
         use_container_width=True,
     )
+
 with col11:
     st.download_button(
         "Lataa Word",
@@ -827,6 +963,7 @@ with col11:
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         use_container_width=True,
     )
+
 with col12:
     st.download_button(
         "Lataa TXT",
@@ -838,7 +975,9 @@ with col12:
             f"Kokonaisarvio: {report_data['yhteenveto']['kokonaisarvio']}\n\n"
             f"Välittömät toimenpiteet:\n{report_data['yhteenveto']['valittomat_toimet']}\n\n"
             f"Muut toimenpiteet:\n{report_data['yhteenveto']['muut_toimet']}\n\n"
-            f"Lisähuomiot:\n{report_data['yhteenveto']['lisahuomiot']}\n"
+            f"Lisähuomiot:\n{report_data['yhteenveto']['lisahuomiot']}\n\n"
+            f"{COPYRIGHT_TEXT}\n"
+            f"{WEBSITE_URL}\n"
         ).encode("utf-8"),
         file_name=f"tarkastuspoytakirja_{date.today().isoformat()}.txt",
         mime="text/plain",
@@ -850,15 +989,16 @@ st.components.v1.html(html_report, height=900, scrolling=True)
 
 with st.expander("Asennus- ja käyttöohje"):
     st.code(
-        """pip install streamlit python-docx reportlab pillow\npython -m streamlit run tarkastuspoytakirja_streamlit_app.py""",
+        """pip install streamlit python-docx reportlab pillow
+python -m streamlit run tarkastuspoytakirja_streamlit_app.py""",
         language="bash",
     )
     st.markdown(
         """
         **Vinkit jatkokehitykseen:**
-        - Lisää yrityksen logo ja omat värit raportteihin.
+        - Lisää tiedosto `mirus_logo.png` samaan kansioon kuin sovellus, jotta logo näkyy sovelluksessa ja raporteissa.
+        - Lisää sama logo GitHub-repoon Streamlit-julkaisua varten.
         - Lisää pakolliset kentät ennen raportin latausta.
         - Lisää automaattinen puutelista vain kohdista `Huomio`, `Korjattava` ja `Välitön vaara`.
-        - Lisää kohdekohtaiset valmiit tarkastusmallit eri laitostyypeille.
         """
     )
