@@ -126,6 +126,27 @@ def init_state() -> None:
         st.session_state.pending_loaded_json = None
     if "json_loaded_message" not in st.session_state:
         st.session_state.json_loaded_message = ""
+    if "reports_ready" not in st.session_state:
+        st.session_state.reports_ready = False
+    if "cached_report_data" not in st.session_state:
+        st.session_state.cached_report_data = None
+    if "cached_html_report" not in st.session_state:
+        st.session_state.cached_html_report = ""
+    if "cached_pdf_bytes" not in st.session_state:
+        st.session_state.cached_pdf_bytes = b""
+    if "cached_word_bytes" not in st.session_state:
+        st.session_state.cached_word_bytes = b""
+    if "cached_txt_bytes" not in st.session_state:
+        st.session_state.cached_txt_bytes = b""
+
+
+def invalidate_reports() -> None:
+    st.session_state.reports_ready = False
+    st.session_state.cached_report_data = None
+    st.session_state.cached_html_report = ""
+    st.session_state.cached_pdf_bytes = b""
+    st.session_state.cached_word_bytes = b""
+    st.session_state.cached_txt_bytes = b""
 
 
 def load_logo_bytes() -> bytes:
@@ -190,6 +211,7 @@ def sync_selected_sections() -> None:
     if not filtered:
         filtered = [sec for sec in DEFAULT_ENABLED if sec in available]
     st.session_state.selected_sections = filtered
+    invalidate_reports()
 
 
 def sync_sections_from_tarkastustyyppi() -> None:
@@ -198,6 +220,7 @@ def sync_sections_from_tarkastustyyppi() -> None:
     if tarkastuksen_tyyppi in ["ATEX", "Muuntamotarkastus +ATEX"]:
         current.add("ATEX-tila")
     st.session_state.selected_sections = [sec for sec in get_available_sections() if sec in current]
+    invalidate_reports()
 
 
 def get_base_section_name(section_name: str) -> str:
@@ -210,7 +233,7 @@ def make_key(section: str, item_idx: int, suffix: str) -> str:
     return f"{section}_{item_idx}_{suffix}".replace(" ", "_").replace("/", "_")
 
 
-def resize_image_bytes(file_bytes: bytes, max_width: int = 1600, jpeg_quality: int = 82) -> tuple[bytes, str]:
+def resize_image_bytes(file_bytes: bytes, max_width: int = 1200, jpeg_quality: int = 75) -> tuple[bytes, str]:
     image = Image.open(BytesIO(file_bytes))
     if image.mode not in ("RGB", "L"):
         image = image.convert("RGB")
@@ -271,6 +294,7 @@ def render_check_section(section_name: str, items: List[str]) -> None:
                     height=80,
                     placeholder="Kirjaa havainto, mittaustulos, poikkeama tai lisätieto...",
                     label_visibility="collapsed",
+                    on_change=invalidate_reports,
                 )
                 uploaded_images = st.file_uploader(
                     "Liitä havaintokuvia",
@@ -282,6 +306,7 @@ def render_check_section(section_name: str, items: List[str]) -> None:
                 if uploaded_images:
                     image_list = encode_uploaded_files(uploaded_images)
                     st.session_state[make_key(section_name, idx, "image_data")] = image_list
+                    invalidate_reports()
 
                 saved_images = st.session_state.get(make_key(section_name, idx, "image_data"), [])
                 if saved_images:
@@ -296,6 +321,7 @@ def render_check_section(section_name: str, items: List[str]) -> None:
                             )
                     if st.button("Poista kaikki kuvat", key=make_key(section_name, idx, "remove_image")):
                         st.session_state[make_key(section_name, idx, "image_data")] = []
+                        invalidate_reports()
                         st.rerun()
 
             with col2:
@@ -303,16 +329,19 @@ def render_check_section(section_name: str, items: List[str]) -> None:
                     "Tila",
                     STATUS_OPTIONS,
                     key=make_key(section_name, idx, "status"),
+                    on_change=invalidate_reports,
                 )
                 st.selectbox(
                     "Riskitaso",
                     RISK_OPTIONS,
                     key=make_key(section_name, idx, "risk"),
+                    on_change=invalidate_reports,
                 )
                 st.text_input(
                     "Toimenpide / vastuuhenkilö",
                     key=make_key(section_name, idx, "action"),
                     placeholder="Esim. huolto / kiinteistöpäällikkö",
+                    on_change=invalidate_reports,
                 )
 
 
@@ -702,6 +731,33 @@ def gather_form_data() -> Dict:
     return report_data
 
 
+def prepare_reports() -> None:
+    report_data = gather_form_data()
+    html_report = build_report(report_data)
+    pdf_bytes = build_pdf(report_data)
+    word_bytes = build_word(report_data)
+
+    txt_bytes = (
+        f"Tarkastuspöytäkirja\n"
+        f"Kohde: {report_data['kohde']['kohteen_nimi']}\n"
+        f"Päivä: {report_data['kohde']['tarkastuspaiva']}\n"
+        f"Tarkastaja: {report_data['kohde']['tarkastaja']}\n"
+        f"Kokonaisarvio: {report_data['yhteenveto']['kokonaisarvio']}\n\n"
+        f"Välittömät toimenpiteet:\n{report_data['yhteenveto']['valittomat_toimet']}\n\n"
+        f"Muut toimenpiteet:\n{report_data['yhteenveto']['muut_toimet']}\n\n"
+        f"Lisähuomiot:\n{report_data['yhteenveto']['lisahuomiot']}\n\n"
+        f"{COPYRIGHT_TEXT}\n"
+        f"{WEBSITE_URL}\n"
+    ).encode("utf-8")
+
+    st.session_state.cached_report_data = report_data
+    st.session_state.cached_html_report = html_report
+    st.session_state.cached_pdf_bytes = pdf_bytes
+    st.session_state.cached_word_bytes = word_bytes
+    st.session_state.cached_txt_bytes = txt_bytes
+    st.session_state.reports_ready = True
+
+
 def load_json_to_state(data: Dict) -> None:
     kohde = data.get("kohde", {})
     yhteenveto = data.get("yhteenveto", {})
@@ -753,6 +809,8 @@ def load_json_to_state(data: Dict) -> None:
             st.session_state[make_key(section_name, idx, "action")] = row.get("toimenpide", "")
             st.session_state[make_key(section_name, idx, "image_data")] = row.get("kuvat", [])
 
+    invalidate_reports()
+
 
 init_state()
 
@@ -787,6 +845,7 @@ with st.sidebar:
         try:
             loaded_data = json.load(uploaded_json)
             st.session_state.pending_loaded_json = loaded_data
+            invalidate_reports()
             st.rerun()
         except Exception as exc:
             st.error(f"JSON-lataus epäonnistui: {exc}")
@@ -814,22 +873,28 @@ st.header("1. Kohdetiedot")
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.text_input("Kohteen nimi", key="kohteen_nimi")
-    st.text_input("Osoite", key="osoite")
-    st.date_input("Tarkastuspäivä", key="tarkastuspaiva", value=date.today(), format="DD.MM.YYYY")
+    st.text_input("Kohteen nimi", key="kohteen_nimi", on_change=invalidate_reports)
+    st.text_input("Osoite", key="osoite", on_change=invalidate_reports)
+    st.date_input("Tarkastuspäivä", key="tarkastuspaiva", value=date.today(), format="DD.MM.YYYY", on_change=invalidate_reports)
 
 with col2:
-    st.text_input("Tarkastaja", key="tarkastaja")
-    st.text_input("Käytönjohtaja", key="kaytonjohtaja")
-    st.text_input("Kiinteistön yhteyshenkilö", key="yhteyshenkilo")
+    st.text_input("Tarkastaja", key="tarkastaja", on_change=invalidate_reports)
+    st.text_input("Käytönjohtaja", key="kaytonjohtaja", on_change=invalidate_reports)
+    st.text_input("Kiinteistön yhteyshenkilö", key="yhteyshenkilo", on_change=invalidate_reports)
 
 with col3:
     st.selectbox(
         "Suurin nimellisjännite",
         ["Pienoisjännite", "230 V", "400 V", "6 kV", "10 kV", "20 kV"],
         key="suurin_nimellisjannite",
+        on_change=invalidate_reports,
     )
-    st.text_input("Kohteen tyyppi", key="kohteen_tyyppi", placeholder="Esim. muuntamo / teollisuuskohde / pumppaamo")
+    st.text_input(
+        "Kohteen tyyppi",
+        key="kohteen_tyyppi",
+        placeholder="Esim. muuntamo / teollisuuskohde / pumppaamo",
+        on_change=invalidate_reports,
+    )
     st.selectbox(
         "Tarkastuksen tyyppi",
         ["Muuntamotarkastus", "ATEX", "Muuntamotarkastus +ATEX"],
@@ -837,13 +902,14 @@ with col3:
         on_change=sync_sections_from_tarkastustyyppi,
     )
 
-st.text_input("Sää / olosuhteet", key="olosuhteet", placeholder="Esim. kuiva, pakkasta -8 C")
+st.text_input("Sää / olosuhteet", key="olosuhteet", placeholder="Esim. kuiva, pakkasta -8 C", on_change=invalidate_reports)
 
 st.header("2. Tarkastusosiot")
 selected_sections = st.session_state.get("selected_sections", [])
 if st.session_state.get("tarkastuksen_tyyppi") in ["ATEX", "Muuntamotarkastus +ATEX"] and "ATEX-tila" not in selected_sections:
     selected_sections = selected_sections + ["ATEX-tila"]
     st.session_state.selected_sections = selected_sections
+    invalidate_reports()
 
 if not selected_sections:
     st.warning("Valitse vähintään yksi tarkastusosio asetuksista.")
@@ -866,47 +932,48 @@ with col4:
             "Välitön turvallisuusriski",
         ],
         key="kokonaisarvio",
+        on_change=invalidate_reports,
     )
     st.text_area(
         "Välittömät toimenpiteet",
         key="valittomat_toimet",
         height=110,
         placeholder="Kirjaa heti tehtävät toimet, käytön rajoitukset tai erottamistarve.",
+        on_change=invalidate_reports,
     )
     st.text_area(
         "Muut toimenpiteet",
         key="muut_toimet",
         height=110,
         placeholder="Kirjaa suunnitellut korjaukset, lisäselvitykset ja vastuuhenkilöt.",
+        on_change=invalidate_reports,
     )
 
 with col5:
-    st.date_input("Seuraava tarkastus", key="seuraava_tarkastus", value=date.today(), format="DD.MM.YYYY")
+    st.date_input("Seuraava tarkastus", key="seuraava_tarkastus", value=date.today(), format="DD.MM.YYYY", on_change=invalidate_reports)
     st.text_area(
         "Lisähuomiot",
         key="lisahuomiot",
         height=190,
         placeholder="Vapaa yhteenveto, rajaukset, suositukset ja lisätiedot.",
+        on_change=invalidate_reports,
     )
 
 st.header("4. Kuittaukset")
 col6, col7 = st.columns(2)
 
 with col6:
-    st.text_input("Tarkastajan kuittaus", key="tarkastaja_kuittaus", placeholder="Esim. Nimi / päiväys")
+    st.text_input("Tarkastajan kuittaus", key="tarkastaja_kuittaus", placeholder="Esim. Nimi / päiväys", on_change=invalidate_reports)
 
 with col7:
-    st.text_input("Vastaanottajan kuittaus", key="vastaanottaja_kuittaus", placeholder="Esim. Nimi / päiväys")
+    st.text_input("Vastaanottajan kuittaus", key="vastaanottaja_kuittaus", placeholder="Esim. Nimi / päiväys", on_change=invalidate_reports)
 
 st.divider()
 
 report_data = gather_form_data()
 json_bytes = json.dumps(report_data, ensure_ascii=False, indent=2).encode("utf-8")
-html_report = build_report(report_data)
-pdf_bytes = build_pdf(report_data)
-word_bytes = build_word(report_data)
 
-col8, col9, col10, col11, col12 = st.columns(5)
+col8, col9 = st.columns([1, 1])
 
 with col8:
     st.download_button(
@@ -918,54 +985,53 @@ with col8:
     )
 
 with col9:
-    st.download_button(
-        "Lataa HTML",
-        data=html_report.encode("utf-8"),
-        file_name=f"tarkastuspoytakirja_{date.today().isoformat()}.html",
-        mime="text/html",
-        use_container_width=True,
-    )
+    if st.button("Valmistele raportit", use_container_width=True):
+        prepare_reports()
+        st.success("Raportit valmiina ladattavaksi.")
 
-with col10:
-    st.download_button(
-        "Lataa PDF",
-        data=pdf_bytes,
-        file_name=f"tarkastuspoytakirja_{date.today().isoformat()}.pdf",
-        mime="application/pdf",
-        use_container_width=True,
-    )
+if st.session_state.reports_ready:
+    col10, col11, col12, col13 = st.columns(4)
 
-with col11:
-    st.download_button(
-        "Lataa Word",
-        data=word_bytes,
-        file_name=f"tarkastuspoytakirja_{date.today().isoformat()}.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        use_container_width=True,
-    )
+    with col10:
+        st.download_button(
+            "Lataa HTML",
+            data=st.session_state.cached_html_report.encode("utf-8"),
+            file_name=f"tarkastuspoytakirja_{date.today().isoformat()}.html",
+            mime="text/html",
+            use_container_width=True,
+        )
 
-with col12:
-    st.download_button(
-        "Lataa TXT",
-        data=(
-            f"Tarkastuspöytäkirja\n"
-            f"Kohde: {report_data['kohde']['kohteen_nimi']}\n"
-            f"Päivä: {report_data['kohde']['tarkastuspaiva']}\n"
-            f"Tarkastaja: {report_data['kohde']['tarkastaja']}\n"
-            f"Kokonaisarvio: {report_data['yhteenveto']['kokonaisarvio']}\n\n"
-            f"Välittömät toimenpiteet:\n{report_data['yhteenveto']['valittomat_toimet']}\n\n"
-            f"Muut toimenpiteet:\n{report_data['yhteenveto']['muut_toimet']}\n\n"
-            f"Lisähuomiot:\n{report_data['yhteenveto']['lisahuomiot']}\n\n"
-            f"{COPYRIGHT_TEXT}\n"
-            f"{WEBSITE_URL}\n"
-        ).encode("utf-8"),
-        file_name=f"tarkastuspoytakirja_{date.today().isoformat()}.txt",
-        mime="text/plain",
-        use_container_width=True,
-    )
+    with col11:
+        st.download_button(
+            "Lataa PDF",
+            data=st.session_state.cached_pdf_bytes,
+            file_name=f"tarkastuspoytakirja_{date.today().isoformat()}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
 
-st.subheader("Raporttiesikatselu")
-st.components.v1.html(html_report, height=900, scrolling=True)
+    with col12:
+        st.download_button(
+            "Lataa Word",
+            data=st.session_state.cached_word_bytes,
+            file_name=f"tarkastuspoytakirja_{date.today().isoformat()}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+        )
+
+    with col13:
+        st.download_button(
+            "Lataa TXT",
+            data=st.session_state.cached_txt_bytes,
+            file_name=f"tarkastuspoytakirja_{date.today().isoformat()}.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+
+    st.subheader("Raporttiesikatselu")
+    st.components.v1.html(st.session_state.cached_html_report, height=900, scrolling=True)
+else:
+    st.info("Valitse 'Valmistele raportit', kun haluat muodostaa HTML-, PDF-, Word- ja TXT-raportit.")
 
 with st.expander("Asennus- ja käyttöohje"):
     st.markdown(
@@ -994,14 +1060,15 @@ JSON on ohjelman tallennustiedosto. Sen avulla tarkastusta voi jatkaa myöhemmin
 2. Avaa vasemman reunan **Asetukset**.
 3. Kohdassa **Tallenna / lataa** valitse aiemmin tallennettu JSON-tiedosto.
 4. Lomake täyttyy automaattisesti aiemmin tallennetuilla tiedoilla.
-5. Viimeistele tarkastus ja lataa lopullinen raportti PDF-, Word-, HTML- tai TXT-muodossa.
+5. Viimeistele tarkastus ja valitse **Valmistele raportit**.
+6. Lataa lopullinen raportti PDF-, Word-, HTML- tai TXT-muodossa.
 
 **Suositeltu toimintatapa kenttätyössä**
 
 - Tee tarkastus puhelimella paikan päällä.
 - Tallenna JSON työn lopuksi tai jo välivaiheessa.
 - Avaa sama JSON myöhemmin tietokoneella, jos haluat viimeistellä raportin suuremmalla näytöllä.
-- Lataa lopullinen raportti vasta viimeistelyn jälkeen.
+- Valmistele lopulliset raportit vasta viimeistelyn jälkeen.
 
 Lisätiedot: {WEBSITE_URL}
 """
