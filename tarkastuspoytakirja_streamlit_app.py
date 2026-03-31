@@ -1,11 +1,12 @@
 import base64
+import hashlib
 import json
 from datetime import date, datetime
 from io import BytesIO
 from typing import Dict, List
 
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -126,6 +127,8 @@ def init_state() -> None:
         st.session_state.pending_loaded_json = None
     if "json_loaded_message" not in st.session_state:
         st.session_state.json_loaded_message = ""
+    if "json_uploader_version" not in st.session_state:
+        st.session_state.json_uploader_version = 0
     if "reports_ready" not in st.session_state:
         st.session_state.reports_ready = False
     if "cached_report_data" not in st.session_state:
@@ -233,19 +236,27 @@ def make_key(section: str, item_idx: int, suffix: str) -> str:
     return f"{section}_{item_idx}_{suffix}".replace(" ", "_").replace("/", "_")
 
 
-def resize_image_bytes(file_bytes: bytes, max_width: int = 1200, jpeg_quality: int = 75) -> tuple[bytes, str]:
-    image = Image.open(BytesIO(file_bytes))
-    if image.mode not in ("RGB", "L"):
-        image = image.convert("RGB")
+def resize_image_bytes(file_bytes: bytes, max_width: int = 900, jpeg_quality: int = 65) -> tuple[bytes, str]:
+    with Image.open(BytesIO(file_bytes)) as img:
+        img = ImageOps.exif_transpose(img)
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        img.thumbnail((max_width, max_width))
+        output = BytesIO()
+        img.save(output, format="JPEG", quality=jpeg_quality, optimize=True)
+        return output.getvalue(), "image/jpeg"
 
-    width, height = image.size
-    if width > max_width:
-        new_height = int(height * (max_width / width))
-        image = image.resize((max_width, new_height))
 
-    output = BytesIO()
-    image.save(output, format="JPEG", quality=jpeg_quality, optimize=True)
-    return output.getvalue(), "image/jpeg"
+def uploaded_files_signature(uploaded_files) -> str:
+    if not uploaded_files:
+        return ""
+    h = hashlib.sha256()
+    for f in uploaded_files:
+        data = f.getvalue()
+        h.update(f.name.encode("utf-8", errors="ignore"))
+        h.update(str(len(data)).encode("utf-8"))
+        h.update(data[:65536])
+    return h.hexdigest()
 
 
 def encode_uploaded_files(uploaded_files) -> List[Dict]:
@@ -264,6 +275,21 @@ def encode_uploaded_files(uploaded_files) -> List[Dict]:
             }
         )
     return images
+
+
+def maybe_store_uploaded_images(section_name: str, idx: int, uploaded_images) -> None:
+    if not uploaded_images:
+        return
+
+    sig_key = make_key(section_name, idx, "image_sig")
+    new_sig = uploaded_files_signature(uploaded_images)
+    old_sig = st.session_state.get(sig_key, "")
+
+    if new_sig and new_sig != old_sig:
+        image_list = encode_uploaded_files(uploaded_images)
+        st.session_state[make_key(section_name, idx, "image_data")] = image_list
+        st.session_state[sig_key] = new_sig
+        invalidate_reports()
 
 
 def decode_image_bytes(image_dict: Dict) -> bytes:
@@ -303,10 +329,7 @@ def render_check_section(section_name: str, items: List[str]) -> None:
                     accept_multiple_files=True,
                     help="Voit liittää useita kuvia tälle tarkastuskohdalle. Kuvat pienennetään automaattisesti.",
                 )
-                if uploaded_images:
-                    image_list = encode_uploaded_files(uploaded_images)
-                    st.session_state[make_key(section_name, idx, "image_data")] = image_list
-                    invalidate_reports()
+                maybe_store_uploaded_images(section_name, idx, uploaded_images)
 
                 saved_images = st.session_state.get(make_key(section_name, idx, "image_data"), [])
                 if saved_images:
@@ -321,6 +344,7 @@ def render_check_section(section_name: str, items: List[str]) -> None:
                             )
                     if st.button("Poista kaikki kuvat", key=make_key(section_name, idx, "remove_image")):
                         st.session_state[make_key(section_name, idx, "image_data")] = []
+                        st.session_state[make_key(section_name, idx, "image_sig")] = ""
                         invalidate_reports()
                         st.rerun()
 
@@ -808,6 +832,7 @@ def load_json_to_state(data: Dict) -> None:
             st.session_state[make_key(section_name, idx, "comment")] = row.get("kommentti", "")
             st.session_state[make_key(section_name, idx, "action")] = row.get("toimenpide", "")
             st.session_state[make_key(section_name, idx, "image_data")] = row.get("kuvat", [])
+            st.session_state[make_key(section_name, idx, "image_sig")] = ""
 
     invalidate_reports()
 
@@ -818,6 +843,7 @@ if st.session_state.pending_loaded_json is not None:
     load_json_to_state(st.session_state.pending_loaded_json)
     st.session_state.pending_loaded_json = None
     st.session_state.json_loaded_message = "Pöytäkirja ladattu lomakkeelle."
+    st.session_state.json_uploader_version += 1
     st.rerun()
 
 logo_bytes = load_logo_bytes()
@@ -840,7 +866,11 @@ with st.sidebar:
         st.success(st.session_state.json_loaded_message)
         st.session_state.json_loaded_message = ""
 
-    uploaded_json = st.file_uploader("Lataa aiempi JSON-pöytäkirja", type=["json"])
+    uploaded_json = st.file_uploader(
+        "Lataa aiempi JSON-pöytäkirja",
+        type=["json"],
+        key=f"json_uploader_{st.session_state.json_uploader_version}",
+    )
     if uploaded_json is not None:
         try:
             loaded_data = json.load(uploaded_json)
@@ -867,6 +897,7 @@ with st.sidebar:
         options=available_sections,
         key="selected_sections",
         default=default_selected,
+        on_change=sync_selected_sections,
     )
 
 st.header("1. Kohdetiedot")
